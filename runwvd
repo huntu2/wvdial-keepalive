@@ -1,0 +1,175 @@
+#!/bin/bash
+#------------------------------------------------------------------------
+#   Runwvd a script to keep the wvdial alive 
+#   Need:
+#   usb-modeswitch
+#   wvdial
+#   usbutils -> lsub
+#   fping
+#   do compile resetusb.c for your specific system
+#
+#------------------------------------------------------------------------
+
+MYNAME=${0##*/}
+MYPATH=${0%/*}
+
+MODEM_NAME=Huawei
+OUTFOLDER=/tmp
+SLEEPTIME=3
+CHECKTIME=20
+PINGLIMIT=10
+REDIALIMIT=3
+RESETMODEMLIMIT=10
+ENABLEREBOOT=0
+ENABLEEXIT=0
+
+
+if [ "$(id -u)" != "0" ];then
+  echo "Must call $MYNAME as root!"
+  exit 1
+fi
+
+resetmodem () 
+{
+  MODEM=$(lsusb | grep $MODEM_NAME)
+  if [ "$MODEM" == "" ];then
+    echo "$(date +%y%m%d)-$(date +%H%M%S) Modem $MODEM_NAME not found, Exit"
+    if [ "ENABLEEXIT" == "1" ];then
+       rm -f $OUTFOLDER/.$MYNAME
+       exit 1
+    else 
+       echo "$(date +%y%m%d)-$(date +%H%M%S) Exit Disabled"
+    fi
+  else
+    $MYPATH/resetusb /dev/bus/usb/${MODEM:4:3}/${MODEM:15:3}
+  fi
+}
+
+if [ "$1" == "stop" ];then
+  echo "  stoping $MYNAME"
+  pkill wvdial
+  rm -f $OUTFOLDER/.$MYNAME
+  rm -f $OUTFOLDER/$MYANME.log
+  rm -f $OUTFOLDER/wvdial.log
+  pkill runwvd
+  exit 0
+elif [ "$1" == "restart" ];then
+  $0 stop
+  $0 start
+  exit 0
+elif [ "$1" == "start" ];then
+  if [ -e "$OUTFOLDER/.$MYNAME" ];then
+    echo "$0 alredy running, exiting!"
+    exit 0
+  fi
+  echo "  starting $MYNAME"
+  if [ "$2" ];then PROVIDER=$2;fi
+  rm -f $OUTFOLDER/wvdial.log
+  rm -f $OUTFOLDER/$MYNAME.log
+  nohup $0 $PROVIDER >> $OUTFOLDER/$MYNAME.log 2>> $OUTFOLDER/$MYNAME.log &
+  exit 0
+elif [ "$1" == "-?" ] || [ "$1" == "--help" ];then
+  echo "$0 start|stop|restart <provider>"
+  exit 0
+elif [ "$1" ];then 
+  PROVIDER=$1    
+fi
+
+#starting wvdial keep alive
+echo "$(date +%y%m%d)-$(date +%H%M%S) Starting $MYNAME"
+
+COUNT=0
+REDIAL=0
+CONNECT=0
+RESETMODEM=0
+
+touch $OUTFOLDER/.$MYNAME
+while [ -e "$OUTFOLDER/.$MYNAME" ]
+do
+  #connectivity call
+  if [ ! -e "/sys/class/net/ppp0" ];then
+    if [ ! "$(pidof wvdial)" ];then
+      if [ "$RESETMODEM" -ge "$RESETMODEMLIMIT" ];then
+        RESETMODEM=0
+  	    echo "$(date +%y%m%d)-$(date +%H%M%S) Reset modem limit reach, Reboot!"
+        if [ "$ENABLEREBOOT" == "1" ];then
+          reboot
+          exit 0
+        else
+          echo "$(date +%y%m%d)-$(date +%H%M%S) Reboot disabled"
+        fi
+      elif [ "$REDIAL" -ge "$REDIALIMIT" ];then
+        echo "$(date +%y%m%d)-$(date +%H%M%S) resetmodem"
+        REDIAL=0
+        let "RESETMODEM+=1"
+        resetmodem
+      else
+        CONNECT=0
+        let "REDIAL+=1"
+        echo "$(date +%y%m%d)-$(date +%H%M%S) calling wvdial"
+        nohup wvdial -C wvdial.conf $PROVIDER >> $OUTFOLDER/wvdial.log 2>> $OUTFOLDER/wvdial.log &
+      fi
+      
+    #Condition found from wvdial.log
+    elif [ -e "$OUTFOLDER/wvdial.log" ];then 
+      if [ "$(grep "NO CARRIER" $OUTFOLDER/wvdial.log)" ] || 
+         [ "$(grep "modem not responding" $OUTFOLDER/wvdial.log)" ]
+        then
+        echo "$(date +%y%m%d)-$(date +%H%M%S) No CARRIER or Not Responding, Reboot!"
+        if [ "$ENABLEREBOOT" == "1" ];then
+          reboot
+          exit 0
+        else
+          echo "$(date +%y%m%d)-$(date +%H%M%S) Reboot disabled"
+        fi
+      elif [ "$(grep Disconnecting $OUTFOLDER/wvdial.log)" ];then  
+        echo "$(date +%y%m%d)-$(date +%H%M%S) Disconnected !"
+      fi
+    fi
+    
+  #pass here if ppp0 exist  
+  #connectivitiy test every CHECKTIME x SLEEPTIME periode
+  elif [ "$COUNT" -ge "$CHECKTIME" ];then
+    COUNT=0
+    LOOPING=true
+    RESPING=0
+    PINGCOUNT=0
+
+    while($LOOPING);do
+      let "PINGCOUNT+=1"
+            
+      RES=$(cat /etc/resolv.conf)
+      IRES=($RES)
+      IPIRES=${IRES[1]}
+            
+      PINGIRES=$(fping $IPIRES|grep alive)
+                                        
+      if [ "$PINGIRES" != "" ];then
+        let "RESPING+=1"
+        LOOPING=false
+      fi
+            
+      if [ "$PINGCOUNT" -ge "$PINGLIMIT" ];then LOOPING=false;fi
+      sleep 1
+    done
+        
+    if [ "$RESPING" -eq "0" ];then
+      echo "$(date +%y%m%d)-$(date +%H%M%S) dns unreachable!"
+      pkill wvdial
+    fi
+        
+  elif [ "$CONNECT" -eq "0" ];then
+    CONNECT=1
+    RESETMODEM=0
+    REDIAL=0
+    echo -e "$(date +%y%m%d)-$(date +%H%M%S) connected to $PROVIDER!\n"
+    #echo "    Check PPP0 exist & WVDIAL run every $SLEEPTIME Second"
+    #echo "    Ping DNS $IPIRES every $CHECKTIME Second"
+    #echo "    Redial after $PINGLIMIT ping fail"
+    #echo "    Resetmodem after $REDIALIMIT Redial attempt"
+  fi
+
+  let "COUNT+=$SLEEPTIME"
+  sleep $SLEEPTIME
+
+done
