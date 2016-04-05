@@ -4,7 +4,7 @@
 #   Need:
 #   usb-modeswitch
 #   wvdial
-#   usbutils -> lsub
+#   usbutils -> lsusb
 #   fping
 #   do compile resetusb.c for your specific system
 #
@@ -20,7 +20,7 @@ CHECKTIME=20
 PINGLIMIT=10
 REDIALIMIT=3
 RESETMODEMLIMIT=10
-ENABLEREBOOT=0
+ENABLEREBOOT=1
 ENABLEEXIT=0
 
 
